@@ -1,0 +1,13 @@
+train: train/images
+val: valid/images
+test: test/images
+
+nc: 1
+names: ['ID_card']
+
+roboflow:
+  workspace: raden-aryo-abadi-5acxe
+  project: id-card-go7hc
+  version: 1
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/raden-aryo-abadi-5acxe/id-card-go7hc/dataset/1
