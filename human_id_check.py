@@ -1,15 +1,17 @@
 import cv2
 from ultralytics import YOLO
 
+from rtsp_stream import RTSPVideoStream
+
 # Load models
 person_model = YOLO("yolov8n.pt")  # detects persons
 id_model = YOLO("runs/detect/retrain_v2/weights/best.pt")  # your trained ID model
-
-cap = cv2.VideoCapture(0)
+rtsp_url='rtsp://admin:Amicus%402026@192.168.2.99:554/live'
+cap = RTSPVideoStream(rtsp_url).start()
 
 while True:
-    ret, frame = cap.read()
-    if not ret:
+    frame = cap.read()
+    if frame is None:
         break
 
     # Run both models
