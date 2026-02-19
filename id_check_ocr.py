@@ -2,7 +2,17 @@ import cv2
 from ultralytics import YOLO
 import easyocr
 import re
-import numpy as np
+import os
+from datetime import datetime
+
+# ---------------------------------------
+# CONFIG
+# ---------------------------------------
+BASE_DEBUG_DIR = "debug_live"
+
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+DEBUG_DIR = os.path.join(BASE_DEBUG_DIR, f"session_{timestamp}")
+os.makedirs(DEBUG_DIR, exist_ok=True)
 
 # ---------------------------------------
 # LOAD MODELS
@@ -18,12 +28,26 @@ cap = cv2.VideoCapture(0)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
-print("🎥 Live feed started. Press 'q' to exit.")
+print(f"🎥 Live feed started. Debug saving to: {DEBUG_DIR}")
+print("Press 'q' to exit.")
 
+# ---------------------------------------
+# STATE
+# ---------------------------------------
+frame_count = 0
+
+# Per-person name cache
+person_names = {}
+
+# ---------------------------------------
+# LOOP
+# ---------------------------------------
 while True:
     ret, frame = cap.read()
     if not ret:
         break
+
+    frame_count += 1
 
     person_results = person_model(frame, conf=0.5, verbose=False)
     id_results = id_model(frame, conf=0.5, verbose=False)
@@ -31,90 +55,145 @@ while True:
     persons = person_results[0].boxes
     ids = id_results[0].boxes
 
-    for p in persons:
+    for p_idx, p in enumerate(persons):
 
         if int(p.cls[0]) != 0:
             continue
 
         x1, y1, x2, y2 = map(int, p.xyxy[0])
 
-        for i in ids:
+        id_found_for_person = False
+        detected_name = ""
+
+        for jdx, i in enumerate(ids):
 
             ix1, iy1, ix2, iy2 = map(int, i.xyxy[0])
 
+            # Center check (ID belongs to person)
             cx = (ix1 + ix2) // 2
             cy = (iy1 + iy2) // 2
 
             if x1 < cx < x2 and y1 < cy < y2:
 
-                # ---- Crop ID ----
-                id_crop = frame[iy1:iy2, ix1:ix2]
+                id_found_for_person = True
 
-                h, w = id_crop.shape[:2]
+                # ---------------------------------------
+                # PADDING
+                # ---------------------------------------
+                pad = 40
+                ix1_p = max(0, ix1 - pad)
+                iy1_p = max(0, iy1 - pad)
+                ix2_p = min(frame.shape[1], ix2 + pad)
+                iy2_p = min(frame.shape[0], iy2 + pad)
 
-                # ---- Split Regions ----
-                name_region = id_crop[int(0.35*h):int(0.65*h), :]
-                id_region   = id_crop[int(0.65*h):int(0.85*h), :]
+                id_crop = frame[iy1_p:iy2_p, ix1_p:ix2_p]
 
-                # ---- Preprocess Function ----
-                def preprocess(img):
-                    img = cv2.resize(img, None, fx=4, fy=4,
-                                     interpolation=cv2.INTER_CUBIC)
-                    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                    _, thresh = cv2.threshold(gray, 120, 255,
-                                              cv2.THRESH_BINARY)
-                    return thresh
+                # ---------------------------------------
+                # SAFE UPSCALE
+                # ---------------------------------------
+                id_crop = cv2.resize(
+                    id_crop,
+                    None,
+                    fx=2.5,
+                    fy=2.5,
+                    interpolation=cv2.INTER_LINEAR
+                )
 
-                name_region = preprocess(name_region)
-                id_region = preprocess(id_region)
+                # ---------------------------------------
+                # OCR EVERY 15 FRAMES
+                # ---------------------------------------
+                if frame_count % 15 == 0:
 
-                # ---- OCR ----
-                name_text = reader.readtext(name_region)
-                id_text = reader.readtext(id_region)
+                    ocr_results = reader.readtext(id_crop)
 
-                detected_name = ""
-                detected_id = ""
+                    print(f"\n🔍 OCR DEBUG (Person {p_idx}):")
 
-                for (_, text, prob) in name_text:
-                    if prob > 0.4:
-                        clean = text.strip()
-                        if re.match(r'^[A-Za-z ]+$', clean):
-                            if len(clean) > 3:
-                                detected_name += clean + " "
+                    for (_, text, prob) in ocr_results:
+                        print(text, f"{prob:.2f}")
 
-                for (_, text, prob) in id_text:
-                    if prob > 0.4:
-                        match = re.search(r'\d{4,8}', text)
-                        if match:
-                            detected_id = match.group()
+                        if prob > 0.25:
+                            clean = text.strip()
 
-                detected_name = detected_name.strip()
+                            # Ignore noise
+                            if clean.lower() in ["amicius", "amicus"]:
+                                continue
 
-                # ---- Draw Output ----
-                cv2.rectangle(frame, (x1,y1), (x2,y2), (0,255,0), 2)
+                            # Name filter
+                            if re.match(r'^[A-Za-z ]+$', clean):
+                                if 4 < len(clean) < 30:
+                                    detected_name += clean + " "
 
-                if detected_name:
-                    cv2.putText(frame,
-                                detected_name,
-                                (x1, y1 - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                0.8,
-                                (0,255,0),
-                                2)
+                    detected_name = detected_name.strip()
 
-                if detected_id:
-                    cv2.putText(frame,
-                                f"ID: {detected_id}",
-                                (x1, y2 + 30),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                0.8,
-                                (0,255,255),
-                                2)
+                    # Save valid name per person
+                    if detected_name:
+                        person_names[p_idx] = detected_name
 
-    cv2.imshow("Live ID Detection + OCR", frame)
+                    # ---------------------------------------
+                    # SAVE DEBUG IMAGES
+                    # ---------------------------------------
+                    base_name = f"{timestamp}_frame{frame_count}_p{p_idx}_id{jdx}"
+
+                    debug_frame = frame.copy()
+                    cv2.rectangle(debug_frame, (x1, y1), (x2, y2), (0,255,0), 2)
+                    cv2.rectangle(debug_frame, (ix1, iy1), (ix2, iy2), (255,0,0), 2)
+
+                    cv2.imwrite(f"{DEBUG_DIR}/{base_name}_frame.jpg", debug_frame)
+                    cv2.imwrite(f"{DEBUG_DIR}/{base_name}_crop.jpg", id_crop)
+
+        # ---------------------------------------
+        # DRAW OUTPUT PER PERSON
+        # ---------------------------------------
+        if id_found_for_person:
+
+            if p_idx in person_names:
+                # ✅ Name detected
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0,255,0), 2)
+
+                cv2.putText(frame,
+                            person_names[p_idx],
+                            (x1, y1 - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.9,
+                            (0,255,0),
+                            2)
+
+            else:
+                # 🟡 ID present but name not read yet
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0,255,255), 2)
+
+                cv2.putText(frame,
+                            "ID Detected",
+                            (x1, y1 - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.9,
+                            (0,255,255),
+                            2)
+
+        else:
+            # ❌ No ID
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0,0,255), 2)
+
+            cv2.putText(frame,
+                        "NO ID",
+                        (x1, y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.9,
+                        (0,0,255),
+                        2)
+
+    # ---------------------------------------
+    # DISPLAY
+    # ---------------------------------------
+    cv2.imshow("Live ID + Name Detection (Multi-Person)", frame)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
+# ---------------------------------------
+# CLEANUP
+# ---------------------------------------
 cap.release()
 cv2.destroyAllWindows()
+
+print(f"\n📁 Debug images saved in: {DEBUG_DIR}")
