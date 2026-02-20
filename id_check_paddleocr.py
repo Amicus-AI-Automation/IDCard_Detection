@@ -1,4 +1,9 @@
 import os
+
+# ---------------------------------------
+# FIXES (CRITICAL FOR PADDLE 3.x)
+# ---------------------------------------
+os.environ["FLAGS_use_mkldnn"] = "0"
 os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 
 import cv2
@@ -22,7 +27,7 @@ os.makedirs(DEBUG_DIR, exist_ok=True)
 person_model = YOLO("yolov8n.pt")
 id_model = YOLO("runs/detect/retrain_v2/weights/best.pt")
 
-# ✅ Updated PaddleOCR initialization
+# PaddleOCR (NEW API)
 ocr = PaddleOCR(
     lang='en',
     use_textline_orientation=True
@@ -72,7 +77,6 @@ while True:
 
             ix1, iy1, ix2, iy2 = map(int, i.xyxy[0])
 
-            # Check if ID belongs to person
             cx = (ix1 + ix2) // 2
             cy = (iy1 + iy2) // 2
 
@@ -107,30 +111,32 @@ while True:
                 # ---------------------------------------
                 if frame_count % 15 == 0:
 
-                    result = ocr.ocr(id_crop)
+                    result = ocr.predict(id_crop)
 
                     detected_name = ""
 
                     print(f"\n🔍 PaddleOCR DEBUG (Person {p_idx}):")
 
-                    if result and result[0]:
-                        for line in result[0]:
-                            text = line[1][0]
-                            prob = line[1][1]
+                    # Handle new output format
+                    if result:
+                        for line in result:
+                            if 'rec_text' in line and 'rec_score' in line:
+                                text = line['rec_text']
+                                prob = line['rec_score']
 
-                            print(text, f"{prob:.2f}")
+                                print(text, f"{prob:.2f}")
 
-                            if prob > 0.5:
-                                clean = text.strip()
+                                if prob > 0.5:
+                                    clean = text.strip()
 
-                                # Ignore noise
-                                if clean.lower() in ["amicius", "amicus"]:
-                                    continue
+                                    # Ignore noise
+                                    if clean.lower() in ["amicius", "amicus"]:
+                                        continue
 
-                                # Name filter
-                                if re.search(r'[A-Za-z]', clean):
-                                    if 4 < len(clean) < 30:
-                                        detected_name += clean + " "
+                                    # Name filter
+                                    if re.search(r'[A-Za-z]', clean):
+                                        if 4 < len(clean) < 30:
+                                            detected_name += clean + " "
 
                     detected_name = detected_name.strip()
 
@@ -150,14 +156,12 @@ while True:
                     cv2.imwrite(f"{DEBUG_DIR}/{base_name}_crop.jpg", id_crop)
 
         # ---------------------------------------
-        # DRAW OUTPUT PER PERSON
+        # DRAW OUTPUT
         # ---------------------------------------
         if id_found_for_person:
 
             if p_idx in person_names:
-                # ✅ Name detected
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0,255,0), 2)
-
                 cv2.putText(frame,
                             person_names[p_idx],
                             (x1, y1 - 10),
@@ -166,9 +170,7 @@ while True:
                             (0,255,0),
                             2)
             else:
-                # 🟡 ID detected but no name yet
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0,255,255), 2)
-
                 cv2.putText(frame,
                             "ID Detected",
                             (x1, y1 - 10),
@@ -178,9 +180,7 @@ while True:
                             2)
 
         else:
-            # ❌ No ID
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0,0,255), 2)
-
             cv2.putText(frame,
                         "NO ID",
                         (x1, y1 - 10),
