@@ -1,4 +1,10 @@
 yolo_env
+<<<<<<< HEAD
 test.py
 camera_snapshot.py
 id_check_ocr.py
+=======
+venv
+debug_live/
+debug_outputs/
+>>>>>>> b764ed563e02452bb62cb25139c0f2d670ac502b

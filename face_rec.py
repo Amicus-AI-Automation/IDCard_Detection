@@ -7,7 +7,7 @@ from deepface import DeepFace
 PERSON_MODEL_PATH = "yolov8n.pt"
 ID_MODEL_PATH = "runs/detect/retrain_v2/weights/best.pt"
 KNOWN_FACES_DIR = "known_faces"
-CONF_THRESHOLD = 0.5
+CONF_THRESHOLD = 0.7
 
 # ---------------- LOAD MODELS ----------------
 person_model = YOLO(PERSON_MODEL_PATH)
