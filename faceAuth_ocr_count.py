@@ -1,201 +1,239 @@
 import cv2
-import csv
 import os
 import re
 import time
-from datetime import datetime
-from collections import deque
-import pandas as pd
+import csv
 from ultralytics import YOLO
-from deep_sort_realtime.deepsort_tracker import DeepSort
 from deepface import DeepFace
 import easyocr
 from fuzzywuzzy import fuzz
 
 # ---------------- CONFIG ----------------
-PERSON_MODEL_PATH = "yolov8n.pt"
-ID_MODEL_PATH = "runs/detect/retrain_v2/weights/best.pt"
+CONF_THRESHOLD = 0.5
 KNOWN_FACES_DIR = "known_faces"
-CSV_PATH = "data/entry_exit_log.csv"
-CAMERA_INDEX = 0
+RESET_TIME = 3  # seconds
+CSV_FILE = "attendance_log.csv"
 
-WINDOW_WIDTH = 1280
-WINDOW_HEIGHT = 720
-LOST_FRAME_THRESHOLD = 20
-ID_CONFIRM_FRAMES = 5
-RESET_TIME = 3
+# ---------------- INIT CSV ----------------
+if not os.path.exists(CSV_FILE):
+    with open(CSV_FILE, mode='w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(["Name", "ID_Detected"])
+
+# Track logged persons
+logged_persons = set()
 
 # ---------------- LOAD MODELS ----------------
-person_model = YOLO(PERSON_MODEL_PATH)
-id_model = YOLO(ID_MODEL_PATH)
-tracker = DeepSort(max_age=60, n_init=2, max_cosine_distance=0.3, nn_budget=100)
+person_model = YOLO("yolov8n.pt")
+id_model = YOLO("runs/detect/retrain_v2/weights/best.pt")
 reader = easyocr.Reader(['en'], gpu=False)
 
-# ---------------- STORAGE ----------------
-people_data = {}
-active_tracks = {}
-inside_people = set()
-last_seen_frame = {}
-id_history = {}
+# ---------------- CAMERA ----------------
+cap = cv2.VideoCapture(0)
+
+# ---------------- STATE ----------------
 person_state = {}
 last_seen_id = {}
 
-os.makedirs(os.path.dirname(CSV_PATH), exist_ok=True)
-
-if not os.path.exists(CSV_PATH):
-    with open(CSV_PATH, "w", newline="", buffering=1) as f:
-        writer = csv.writer(f)
-        writer.writerow(["name", "in_count", "out_count", "is_wearing_id", "first_entry_time", "last_exit_time"])
-
-# ---------------- HELPERS ----------------
-def save_to_csv():
-    rows = []
-    for name, info in people_data.items():
-        rows.append([
-            name,
-            info["in_count"],
-            info["out_count"],
-            info["is_wearing_id"],
-            info["first_entry_time"],
-            info["last_exit_time"]
-        ])
-    pd.DataFrame(rows, columns=[
-        "name", "in_count", "out_count",
-        "is_wearing_id", "first_entry_time", "last_exit_time"
-    ]).to_csv(CSV_PATH, index=False)
-
-def detect_id_on_person(frame, box):
-    x1, y1, x2, y2 = map(int, box)
-    crop = frame[y1:y2, x1:x2]
-    if crop.size == 0:
-        return False, None
-
-    results = id_model(crop, conf=0.4, verbose=False)[0].boxes
-    if len(results) == 0:
-        return False, None
-
-    b = results[0].xyxy[0].cpu().numpy().astype(int)
-    ix1, iy1, ix2, iy2 = b
-    id_crop = crop[iy1:iy2, ix1:ix2]
-    return True, id_crop
-
-def recognize_face(face_crop):
+# ---------------- FACE RECOGNITION ----------------
+def recognize_face(face_img):
     try:
-        result = DeepFace.find(face_crop, db_path=KNOWN_FACES_DIR, enforce_detection=False, silent=True)
-        if len(result) > 0 and len(result[0]) > 0:
-            return os.path.basename(os.path.dirname(result[0].iloc[0]["identity"]))
+        result = DeepFace.find(
+            img_path=face_img,
+            db_path=KNOWN_FACES_DIR,
+            enforce_detection=False,
+            model_name="Facenet"
+        )
+
+        if len(result) > 0 and not result[0].empty:
+            path = result[0].iloc[0]['identity']
+            return path.split(os.sep)[-2]
     except:
         pass
+
     return "Unknown"
 
+# ---------------- OCR ----------------
 def extract_name(id_crop):
-    id_crop = cv2.resize(id_crop, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_LINEAR)
+
+    id_crop = cv2.resize(id_crop, None, fx=2.5, fy=2.5,
+                         interpolation=cv2.INTER_LINEAR)
+
     results = reader.readtext(id_crop)
+
+    print("\n OCR DEBUG:")
+
     name = ""
     for (_, text, prob) in results:
+        print(text, f"{prob:.2f}")
+
         if prob > 0.3:
             clean = text.strip()
-            if re.match(r'^[A-Za-z ]+$', clean) and 4 < len(clean) < 30:
-                name += clean + " "
+
+            if clean.lower() in ["amicus", "amicius"]:
+                continue
+
+            if re.match(r'^[A-Za-z ]+$', clean):
+                if 4 < len(clean) < 30:
+                    name += clean + " "
+
     return name.strip()
 
+# ---------------- FUZZY MATCH ----------------
 def match_names(face_name, id_name):
+
     if not id_name or not face_name or face_name == "Unknown":
         return False
 
-    score = max(
-        fuzz.ratio(face_name.lower(), id_name.lower()),
-        fuzz.partial_ratio(face_name.lower(), id_name.lower())
-    )
-    return score > 75
+    score_full = fuzz.ratio(face_name.lower(), id_name.lower())
+    score_partial = fuzz.partial_ratio(face_name.lower(), id_name.lower())
 
-# ---------------- CAMERA ----------------
-cap = cv2.VideoCapture(CAMERA_INDEX)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, WINDOW_WIDTH)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, WINDOW_HEIGHT)
+    final_score = max(score_full, score_partial)
 
-print("🎥 Camera started... Press Q to exit")
+    print(f" MATCH → Full: {score_full}, Partial: {score_partial}, Final: {final_score}")
 
+    return final_score > 75
+
+# ---------------- CSV LOG FUNCTION ----------------
+def log_to_csv(name, id_detected):
+
+    if name in logged_persons:
+        return
+
+    with open(CSV_FILE, mode='a', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow([name, id_detected])
+
+    logged_persons.add(name)
+
+# ---------------- MAIN LOOP ----------------
 while True:
     ret, frame = cap.read()
     if not ret:
         break
 
-    results = person_model(frame, conf=0.5, verbose=False)[0]
-    detections = []
+    frame = cv2.resize(frame, (640, 480))
+    current_time = time.time()
 
-    for box in results.boxes:
-        if int(box.cls[0]) == 0:
-            x1, y1, x2, y2 = box.xyxy[0]
-            conf = float(box.conf[0])
-            detections.append(([float(x1), float(y1), float(x2-x1), float(y2-y1)], conf, "person"))
+    person_results = person_model(frame, conf=CONF_THRESHOLD, verbose=False)
+    id_results = id_model(frame, conf=CONF_THRESHOLD, verbose=False)
 
-    tracks = tracker.update_tracks(detections, frame=frame)
-    current_inside = set()
+    persons = person_results[0].boxes
+    ids = id_results[0].boxes
 
-    for track in tracks:
-        if not track.is_confirmed():
+    for p in persons:
+
+        if int(p.cls[0]) != 0:
             continue
 
-        pid = track.track_id
-        l, t, w, h = map(int, track.to_ltrb())
-        x1, y1, x2, y2 = l, t, l+w, t+h
+        x1, y1, x2, y2 = map(int, p.xyxy[0])
+        box_key = (x1//50, y1//50)
 
-        face_crop = frame[y1:y1+(y2-y1)//2, x1:x2]
-        name = recognize_face(face_crop)
-
-        active_tracks[pid] = name
-        current_inside.add(name)
-
-        if name not in people_data:
-            people_data[name] = {
-                "in_count": 1,
-                "out_count": 0,
-                "is_wearing_id": False,
-                "first_entry_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "last_exit_time": ""
+        if box_key not in person_state:
+            person_state[box_key] = {
+                "status": "NO_ID",
+                "name": "",
+                "locked": False
             }
-        elif name not in inside_people:
-            people_data[name]["in_count"] += 1
 
-        inside_people.add(name)
+        state = person_state[box_key]
 
-        has_id, id_crop = detect_id_on_person(frame, (x1, y1, x2, y2))
+        # ---------------- CHECK ID ----------------
+        has_id = False
+        id_crop = None
 
-        label = name
-        color = (0, 0, 255)
+        for i in ids:
+            ix1, iy1, ix2, iy2 = map(int, i.xyxy[0])
 
+            cx = (ix1 + ix2)//2
+            cy = (iy1 + iy2)//2
+
+            if x1 < cx < x2 and y1 < cy < y2:
+                has_id = True
+
+                pad = 40
+                ix1 = max(0, ix1-pad)
+                iy1 = max(0, iy1-pad)
+                ix2 = min(frame.shape[1], ix2+pad)
+                iy2 = min(frame.shape[0], iy2+pad)
+
+                id_crop = frame[iy1:iy2, ix1:ix2]
+                break
+
+        # ---------------- RESET LOGIC ----------------
+        if not has_id:
+            if box_key in last_seen_id:
+                if current_time - last_seen_id[box_key] > RESET_TIME:
+                    person_state[box_key] = {
+                        "status": "NO_ID",
+                        "name": "",
+                        "locked": False
+                    }
+        else:
+            last_seen_id[box_key] = current_time
+
+        # ---------------- MAIN LOGIC ----------------
         if has_id:
-            id_name = extract_name(id_crop) if id_crop is not None else ""
-            if match_names(name, id_name):
-                label = f"{name} +"
+
+            if state["locked"]:
+                label = state["name"] + " +"
                 color = (0, 255, 0)
+
             else:
-                label = f"{name} -"
-                color = (255, 0, 255)
+                state["status"] = "ID_DETECTED"
+
+                face_crop = frame[y1:y1+(y2-y1)//2, x1:x2]
+                face_name = recognize_face(face_crop)
+
+                id_name = extract_name(id_crop) if id_crop is not None else ""
+
+                if id_name and face_name != "Unknown":
+
+                    if match_names(face_name, id_name):
+
+                        state["status"] = "AUTHENTICATED"
+                        state["name"] = face_name
+                        state["locked"] = True
+
+                        label = face_name + " +"
+                        color = (0, 255, 0)
+
+                        log_to_csv(face_name, "YES")
+
+                    else:
+                        state["status"] = "FAILED"
+                        label = face_name + " -"
+                        color = (255, 0, 255)
+
+                        log_to_csv(face_name, "YES")
+
+                else:
+                    label = face_name
+                    color = (0, 255, 255)
+
+                    log_to_csv(face_name, "YES")
+
         else:
             label = "NO ID"
             color = (0, 0, 255)
 
-        stats = f"IN:{people_data[name]['in_count']} OUT:{people_data[name]['out_count']}"
+            log_to_csv("Unknown", "NO")
 
-        cv2.rectangle(frame, (x1,y1), (x2,y2), color, 2)
-        cv2.putText(frame, f"{label} | {stats}", (x1, y1-10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        # ---------------- DRAW ----------------
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
-    for name in list(inside_people):
-        if name not in current_inside:
-            people_data[name]["out_count"] += 1
-            people_data[name]["last_exit_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            inside_people.remove(name)
-            save_to_csv()
+        cv2.putText(frame,
+                    label,
+                    (x1, y1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    color,
+                    2)
 
-    cv2.imshow("Unified Office Security System", frame)
+    cv2.imshow("Final Identity System", frame)
 
-    if cv2.waitKey(1) & 0xFF == ord("q"):
+    if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
 cap.release()
 cv2.destroyAllWindows()
-save_to_csv()
-print("✅ Final CSV saved:", CSV_PATH)
