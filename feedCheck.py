@@ -7,7 +7,7 @@ from rtsp_stream import RTSPVideoStream   # YOUR custom RTSP class
 
 # Config 
 PERSON_MODEL_PATH = "models/yolov8n.pt"
-ID_MODEL_PATH = "runs/detect/retrain_v2/weights/best.pt"
+ID_MODEL_PATH = "models/runs/detect/retrain_v2/weights/best.pt"
 KNOWN_FACES_DIR = "data/known_faces"
 CONF_THRESHOLD = 0.6
 
