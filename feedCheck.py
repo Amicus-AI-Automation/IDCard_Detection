@@ -5,19 +5,19 @@ from ultralytics import YOLO
 from deepface import DeepFace
 from rtsp_stream import RTSPVideoStream   # YOUR custom RTSP class
 
-# ---------------- CONFIG ----------------
-PERSON_MODEL_PATH = "yolov8n.pt"
-ID_MODEL_PATH = "runs/detect/retrain_v2/weights/best.pt"
-KNOWN_FACES_DIR = "known_faces"
+# Config 
+PERSON_MODEL_PATH = "models/yolov8n.pt"
+ID_MODEL_PATH = "models/runs/detect/retrain_v2/weights/best.pt"
+KNOWN_FACES_DIR = "data/known_faces"
 CONF_THRESHOLD = 0.6
 
 rtsp_url='rtsp://admin:Amicus%402026@192.168.2.99:554/live'
 
-# ---------------- LOAD MODELS ----------------
+# Load models
 person_model = YOLO(PERSON_MODEL_PATH)
 id_model = YOLO(ID_MODEL_PATH)
 
-# ---------------- START RTSP STREAM ----------------
+# Start RTSP stream
 cap = RTSPVideoStream(rtsp_url).start()
 
 print("Press Q to exit")
@@ -41,7 +41,7 @@ def enhance_frame(frame):
 
     return sharpened
 
-# ---------------- FACE RECOGNITION FUNCTION ----------------
+# Face recognition function
 def recognize_face(face_img):
     try:
         result = DeepFace.find(
@@ -61,7 +61,7 @@ def recognize_face(face_img):
         return "Unknown"
 
 
-# ---------------- MAIN LOOP ----------------
+# Main loop
 while True:
     frame = cap.read()
 
@@ -86,7 +86,7 @@ while True:
             x1, y1, x2, y2 = map(int, p.xyxy[0])
             person_has_id = False
 
-            # ---------------- CHECK ID INSIDE PERSON ----------------
+            # Check if any ID card box is inside person box
             for i in id_cards:
                 ix1, iy1, ix2, iy2 = map(int, i.xyxy[0])
 
@@ -97,7 +97,7 @@ while True:
                     person_has_id = True
                     break
 
-            # ---------------- FACE RECOGNITION ----------------
+            # Face recognition 
             # Crop upper half of person box (face approx area)
             face_crop = frame[y1:y1 + (y2 - y1)//2, x1:x2]
 
@@ -106,7 +106,7 @@ while True:
             else:
                 person_name = "Unknown"
 
-            # ---------------- FINAL LABEL ----------------
+            # Final label
             if person_has_id:
                 color = (0, 255, 0)
                 id_status = "ID Present"
@@ -134,6 +134,6 @@ while True:
         break
 
 
-# ---------------- CLEANUP ----------------
+# Cleanup
 cap.stop()
 cv2.destroyAllWindows()
