@@ -3,7 +3,7 @@ import os
 import numpy as np
 from ultralytics import YOLO
 from deepface import DeepFace
-from rtsp_stream import RTSPVideoStream   # YOUR custom RTSP class
+from feedCheck.rtsp_stream import RTSPVideoStream   # YOUR custom RTSP class
 
 # Config 
 PERSON_MODEL_PATH = "models/yolov8n.pt"
