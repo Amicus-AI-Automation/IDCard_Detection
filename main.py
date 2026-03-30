@@ -1,4 +1,3 @@
-
 import cv2
 import os
 import re
@@ -50,9 +49,11 @@ def load_known_embeddings():
 
 known_embeddings, known_labels = load_known_embeddings()
 
-# Fast face recognition using precomputed embeddings
+# Face recognition using precomputed embeddings
 def recognize_face(face_img):
     global known_embeddings, known_labels
+    
+    # Validate that embedding database is initialized
     if known_embeddings is None or known_labels is None:
         return "Unknown"
     try:
@@ -60,45 +61,64 @@ def recognize_face(face_img):
         embedding = DeepFace.represent(
             img_path=face_img,
             model_name=EMBEDDING_MODEL,
-            enforce_detection=False
+            enforce_detection=False # Allows processing even if face detection is weak/missed
         )[0]["embedding"]
-        # Compute cosine similarity
+        
+        # Convert stored embeddings and current embedding to numpy arrays
         emb_array = np.array(known_embeddings)
         embedding = np.array(embedding)
-        # Normalize
+        
+        # Normalize vectors to unit length → required for cosine similarity
+        # This ensures comparison is based on direction, not magnitude
         emb_array = emb_array / np.linalg.norm(emb_array, axis=1, keepdims=True)
         embedding = embedding / np.linalg.norm(embedding)
+        
+        #Compute cosine similarity between input embedding and all known embeddings
         similarities = np.dot(emb_array, embedding)
+        
+        # Identify best matching embedding
         best_idx = np.argmax(similarities)
         best_score = similarities[best_idx]
-        # Threshold for recognition (tune as needed)
+        
+        # Threshold for recognition (0.6 is a common threshold for cosine similarity in face recognition)
         if best_score > 0.6:
             return known_labels[best_idx]
+        
     except Exception as e:
+        # Catch runtime issues (e.g., invalid image, embedding failure)
         print(f"Face recognition error: {e}")
+        
     return "Unknown"
  
 # OCR function to extract name from ID card
 def extract_name(id_crop):
- 
+
+    # Upscale image to improve OCR accuracy
     id_crop = cv2.resize(id_crop, None, fx=2.5, fy=2.5,
                          interpolation=cv2.INTER_LINEAR)
- 
+    
+    # Returns list of detections: [(bbox, text, confidence), ...]
     results = reader.readtext(id_crop)
- 
+    
+    # Debug block for inspecting OCR outputs
     print("\n OCR DEBUG:")
- 
     name = ""
+    
+    # Filter and aggregate valid text results based on confidence and content
     for (_, text, prob) in results:
         print(text, f"{prob:.2f}")
- 
+
+        # Discard low-confidence detections to reduce noise
         if prob > 0.3:
             clean = text.strip()
- 
+
+            #Remove known irrelevant tokens
             if clean.lower() in ["amicus", "amicius"]:
                 continue
- 
+                
+            # Allow only alphabetic characters and spaces (reject numbers/symbols)
             if re.match(r'^[A-Za-z ]+$', clean):
+                 # Apply length constraints to filter out noise and short fragments
                 if 4 < len(clean) < 30:
                     name += clean + " "
  
@@ -106,34 +126,41 @@ def extract_name(id_crop):
  
 # Fuzzy matching of names
 def match_names(face_name, id_name):
- 
+    
+    # Reject invalid or unusable inputs early
     if not id_name or not face_name or face_name == "Unknown":
         return False
- 
+
+     # Full ratio → compares entire strings (strict match)
     score_full = fuzz.ratio(face_name.lower(), id_name.lower())
+    
+    # Partial ratio → checks if one string is contained within the other
     score_partial = fuzz.partial_ratio(face_name.lower(), id_name.lower())
- 
+
+    # Use maximum score to balance strict and flexible matching
     final_score = max(score_full, score_partial)
- 
     print(f" MATCH → Full: {score_full}, Partial: {score_partial}, Final: {final_score}")
- 
+
+    #Apply decision threshold
     return final_score > 75
  
-# CSV Logging
+# CSV Logging for Identity Events
 def log_to_csv(name, id_detected):
  
-    # Expect id_detected to be a tuple: (id_detected, id_authenticated)
-    # id_authenticated: 'YES' if OCR name and face name match, else 'NO'
+    # Deduplication check
     if name in logged_persons:
         return
  
-    # Support backward compatibility if id_detected is not a tuple
+    # Normalize input format
     if isinstance(id_detected, tuple):
         id_detected_val, id_authenticated = id_detected
     else:
+        # Backward compatibility:
+        # If a single value is passed, assume authentication = "NO"
         id_detected_val = id_detected
         id_authenticated = "NO"
- 
+        
+    ## Append record to CSV
     with open(CSV_FILE, mode='a', newline='') as f:
         writer = csv.writer(f)
         writer.writerow([name, id_detected_val, id_authenticated])
@@ -142,60 +169,79 @@ def log_to_csv(name, id_detected):
  
 # Main loop
 while True:
+    # Read frame from video stream
     ret, frame = cap.read()
     if not ret:
+        # Exit loop if frame capture fails (end of stream / camera issue)
         break
- 
+    
+    # Standardize frame size for consistent processing and performance
     frame = cv2.resize(frame, (640, 480))
+    # Capture current timestamp for tracking and reset logic
     current_time = time.time()
- 
+    
+    # Run inference for person and ID detection models
     person_results = person_model(frame, conf=CONF_THRESHOLD, verbose=False)
     id_results = id_model(frame, conf=CONF_THRESHOLD, verbose=False)
- 
+    
+    # Extract detected bounding boxes 
     persons = person_results[0].boxes
     ids = id_results[0].boxes
- 
+
+    # Iterate through detected persons
     for p in persons:
- 
+        
+        # Filter only 'person' class (class id = 0)
         if int(p.cls[0]) != 0:
             continue
- 
+        
+        # Extract bounding box coordinates (top-left, bottom-right)    
         x1, y1, x2, y2 = map(int, p.xyxy[0])
+        
+        # Generate a coarse grid-based key for lightweight tracking
         box_key = (x1//50, y1//50)
- 
+        
+        # Initialize state for new detected person
         if box_key not in person_state:
             person_state[box_key] = {
-                "status": "NO_ID",
-                "name": "",
-                "locked": False
+                "status": "NO_ID",  # Current processing status
+                "name": "",         # Identified name
+                "locked": False     # Prevents repeated processing after success
             }
- 
+
+        # Retrieve current state for this person
         state = person_state[box_key]
  
-        # Check ID
+        # ID Association Logic
         has_id = False
         id_crop = None
- 
+        
+        # Iterate through detected ID cards
         for i in ids:
             ix1, iy1, ix2, iy2 = map(int, i.xyxy[0])
- 
+
+            # Compute center of ID bounding box
             cx = (ix1 + ix2)//2
             cy = (iy1 + iy2)//2
- 
+
+            # Check if ID lies within person bounding box
             if x1 < cx < x2 and y1 < cy < y2:
                 has_id = True
- 
+
+                # Apply padding to improve OCR region quality
                 pad = 40
                 ix1 = max(0, ix1-pad)
                 iy1 = max(0, iy1-pad)
                 ix2 = min(frame.shape[1], ix2+pad)
                 iy2 = min(frame.shape[0], iy2+pad)
- 
+
+                # Crop ID region from frame
                 id_crop = frame[iy1:iy2, ix1:ix2]
                 break
  
-        # Reset logic
+        # State Reset Logic
         if not has_id:
+            # Reset state if ID not seen for a threshold duration
             if box_key in last_seen_id:
                 if current_time - last_seen_id[box_key] > RESET_TIME:
                     person_state[box_key] = {
@@ -204,29 +250,36 @@ while True:
                         "locked": False
                     }
         else:
+            # Update last seen timestamp for ID presence
             last_seen_id[box_key] = current_time
  
-        # Main logic
+        # Identity Verification Logic
         if has_id:
- 
+            # If already authenticated, reuse stored result
             if state["locked"]:
                 label = state["name"] + " +"
                 color = (0, 255, 0)
  
             else:
+                # Mark ID detection stage
                 state["status"] = "ID_DETECTED"
- 
+
+                # Crop face region for face recognition (using upper half of person box)
                 face_crop = frame[y1:y1+(y2-y1)//2, x1:x2]
+                # Perform face recognition
                 face_name = recognize_face(face_crop)
- 
+
+                # Extract name from ID using OCR
                 id_name = extract_name(id_crop) if id_crop is not None else ""
- 
+
+                # Proceed only if both OCR and face recognition are valid
                 if id_name and face_name != "Unknown":
+                    
                     # Only log when OCR authentication happens
                     if match_names(face_name, id_name):
                         state["status"] = "AUTHENTICATED"
                         state["name"] = face_name
-                        state["locked"] = True
+                        state["locked"] = True # Lock state to prevent reprocessing until reset
  
                         label = face_name + " +"
                         color = (0, 255, 0)
@@ -235,18 +288,20 @@ while True:
                     else:
                         state["status"] = "FAILED"
                         label = face_name + " -"
-                        color = (255, 0, 255)
+                        color = (255, 0, 255) # Purple: mismatch
  
                         log_to_csv(face_name, ("YES", "NO"))
                 else:
+                    # Partial detection (face or OCR missing)
                     label = face_name
-                    color = (0, 255, 255)
+                    color = (0, 255, 255) # Yellow: incomplete data
                     # Do not log if OCR authentication did not happen
                     pass
  
         else:
+            # No ID associated with detected person
             label = "NO ID"
-            color = (0, 0, 255)
+            color = (0, 0, 255) # Red: no ID
             # Do not log if no ID
             pass
  
@@ -260,9 +315,10 @@ while True:
                     0.7,
                     color,
                     2)
- 
+    # Display processed frame
     cv2.imshow("Final Identity System", frame)
- 
+
+    # Exit loop on 'q' key press
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
  

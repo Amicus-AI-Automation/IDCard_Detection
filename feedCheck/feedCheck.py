@@ -22,25 +22,6 @@ cap = RTSPVideoStream(rtsp_url).start()
 
 print("Press Q to exit")
 
-def enhance_frame(frame):
-    # Convert to float
-    frame_float = frame.astype('float32') / 255.0
-
-    # Increase contrast slightly
-    alpha = 1.2   # contrast
-    beta = 5      # brightness
-    frame = cv2.convertScaleAbs(frame, alpha=alpha, beta=beta)
-
-    # Sharpen using kernel
-    kernel = [[0, -1, 0],
-              [-1, 5, -1],
-              [0, -1, 0]]
-
-    kernel = np.array(kernel)
-    sharpened = cv2.filter2D(frame, -1, kernel)
-
-    return sharpened
-
 # Face recognition function
 def recognize_face(face_img):
     try:
@@ -128,7 +109,7 @@ while True:
 
     cv2.imshow("RTSP Human + ID + Face Recognition", frame)
     
-    # added to enhnce resolution 
+    # added to enhance resolution 
     
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break

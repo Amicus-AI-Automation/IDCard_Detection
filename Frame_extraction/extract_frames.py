@@ -1,8 +1,8 @@
 import cv2
 import os
 
-video_path = "dataset/videos/Resham.mp4"
-output_dir = "known_faces/Resham"
+video_path = "data/videos/Resham.mp4"
+output_dir = "data/known_faces/Resham"
 os.makedirs(output_dir, exist_ok=True)
 
 cap = cv2.VideoCapture(video_path)

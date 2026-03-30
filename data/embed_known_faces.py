@@ -2,7 +2,6 @@
 import os
 import numpy as np
 from deepface import DeepFace
-from tqdm import tqdm
 
 KNOWN_FACES_DIR = "data/known_faces"
 EMBEDDINGS_FILE = os.path.join(KNOWN_FACES_DIR, "known_faces_embeddings.npz")
